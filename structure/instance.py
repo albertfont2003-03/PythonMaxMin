@@ -53,7 +53,7 @@ def readInstance(path: str):
 
     # ---------------- GEO / GLOVER (n + k + coords) ----------------
     n = int(lines[0])
-    k = int(lines[1])  # ✅ esto es la DIMENSIÓN, NO p
+    k = int(lines[1])
 
     if "geo" in lower:
         p = infer_p_for_geo_ran(path, n)      # 0.1n o 0.3n según id

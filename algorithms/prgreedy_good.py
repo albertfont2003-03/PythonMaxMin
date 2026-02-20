@@ -140,17 +140,7 @@ def findBestSwap(current_sol, sel_initiating_dif, sel_guiding_dif):
 
 
 def greedyPathRelinking(initiating_sol, guiding_sol):
-    """Greedy Path Relinking (PR) per al Max-Min Diversity.
 
-    - Parteix d'initiating_sol i va transformant-la cap a guiding_sol.
-    - En cada pas, prova tots els swaps possibles (i en A, j en B) i tria
-      el que maximitza l'OF resultant.
-    - Retorna la millor solució trobada al llarg del camí.
-
-    Nota:
-    Apliquem el swap utilitzant les funcions de structure.solution (una volta per iteració),
-    però la selecció del millor swap es fa amb càlcul incremental eficient.
-    """
     sel_initiating_dif = set(initiating_sol['sol']) - set(guiding_sol['sol'])
     sel_guiding_dif = set(guiding_sol['sol']) - set(initiating_sol['sol'])
 
@@ -180,7 +170,7 @@ def greedyPathRelinking(initiating_sol, guiding_sol):
         solution.removeFromSolution(current_sol, i)
         solution.addToSolution(current_sol, j)
 
-        # per coherència i per a no dependre de recomputacions:
+
         current_sol['of'] = best_of
 
         sel_initiating_dif.remove(i)

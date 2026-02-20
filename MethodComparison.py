@@ -3,6 +3,7 @@ import re
 import csv
 import math
 import random
+import time
 import statistics as stats
 from datetime import datetime
 from structure import solution
@@ -21,18 +22,17 @@ EPS = 1e-9
 # -----------------------
 INST_DIR = "instances"  # dins tens Geo/ i Ran/
 DATASETS = ["Geo","Ran"]
-NS = [100,250]
-M_FRACS = [0.1,0.3]           # m = 0.1n i m = 0.3n
+NS = [100,250, 500]
+M_FRACS = [0.1,0.3]
 INSTANCES_PER_GROUP = 10       # 10 instàncies per (dataset,n,m)
 ITERS = 100                    # 100 solucions per instància i mètode
 SEED = 12345                   # per reproduïbilitat
 
-# Paràmetres constructius:
-# paper: GRC alpha=0.95 però en la teua definició és invers -> alpha_teu = 1-0.95=0.05
-ALPHA_TEUA = 0.05
+
+ALPHA_TEUA = 0.1
 BETA = 0.9
 
-# IMLS param
+
 IMLS_K = 3
 
 
@@ -84,15 +84,24 @@ def load_instance(dataset, path, p):
     raise ValueError(dataset)
 
 
-def pick_instance_paths(dataset, n, k, base_dir=INST_DIR):
+def list_instance_paths(dataset, n, base_dir=INST_DIR):
     folder = os.path.join(base_dir, dataset)
     files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".txt")]
-    # filtre per n en el nom (p.ex. "Geo 100 1.txt" / "Ran 250 3.txt")
-    pat = re.compile(rf"\b{n}\b")
-    files = [f for f in files if pat.search(os.path.basename(f))]
-    files.sort()
-    # agafa k (si vols aleatori, canvia-ho per random.sample)
-    return files[:k]
+
+    # Filtra por n en el nombre
+    pat_n = re.compile(rf"\b{n}\b")
+    files = [f for f in files if pat_n.search(os.path.basename(f))]
+
+    # Extrae el índice final del fichero (último número antes de .txt)
+    def extract_idx(path):
+        base = os.path.basename(path)
+        m = re.search(r"(\d+)\.txt$", base)
+        return int(m.group(1)) if m else 10**9
+
+    files.sort(key=extract_idx)
+    return files, extract_idx
+
+
 
 
 # -----------------------
@@ -142,21 +151,22 @@ METHODS = [
 
 
 def run_one_iteration(inst, constructive_name, ls_name):
+    start = time.perf_counter()
+
     if constructive_name == "CGR":
         sol = constructive_CGR(inst)
     elif constructive_name == "CGR2":
         sol = constructive_CGR2(inst)
     else:
-        raise ValueError(constructive_name)
-
-    # assegura factible i coherent abans de LS (si vols)
+        raise ValueError(f"Unknown constructive: {constructive_name}")
     check_solution(sol)
-
     apply_ls(sol, ls_name)
-
-    # comprova després de LS
     check_solution(sol)
-    return sol["of"]
+
+    end = time.perf_counter()
+    elapsed = end - start
+
+    return sol["of"], elapsed
 
 
 # -----------------------
@@ -172,7 +182,7 @@ def experiment():
     per_instance_rows = []
     summary_rows = []
 
-    # per a Score: assignarem punts 6..1 segons rank per instància (empats: punts mitjans)
+
     def rank_points(values_dict):
         # values_dict: method_key -> best_value
         items = sorted(values_dict.items(), key=lambda x: x[1], reverse=True)
@@ -191,68 +201,99 @@ def experiment():
             i = j
         return points
 
-    # recollim per grup per a summary
-    # key: (dataset,n,m) -> list of per-instance method bests
-    group_data = {}  # (dataset,n,m) -> list of dict(method->best)
+
+    group_data = {}
 
     for dataset in DATASETS:
         for n in NS:
-            for frac in M_FRACS:
+
+            paths, extract_idx = list_instance_paths(dataset, n)
+            if not paths:
+                log(f"[WARN] No hi ha instàncies per dataset={dataset}, n={n}")
+                continue
+
+            log(f"== Dataset={dataset}, n={n}. Total instàncies: {len(paths)} ==")
+
+            for path in paths:
+                idx_file = extract_idx(path)  # 1,2,3,...
+
+                # bloque 0: 1-10 ; bloque 1: 11-20 ; ...
+                block = (idx_file - 1) // INSTANCES_PER_GROUP
+
+
+                if block >= len(M_FRACS):
+                    continue
+
+
+
+                frac = M_FRACS[block]
                 m = int(round(frac * n))
 
-                log(f"== Grup: dataset={dataset}, n={n}, m={m} ==")
-                log("Buscant instàncies...")
+                inst = load_instance(dataset, path, p=m)
+                log(f"  Instància: {inst['name']}  -> m={m} (frac={frac})")
 
-                paths = pick_instance_paths(dataset, n, INSTANCES_PER_GROUP)
-                log(f"Trobades {len(paths)} instàncies. Primera: {os.path.basename(paths[0])}")
+                # executa 100 iteracions per cada mètode
+                method_stats = {}
+                method_best = {}
+                method_time = {}
 
-                for idx, path in enumerate(paths, start=1):
-                    inst = load_instance(dataset, path, p=m)
-                    log(f"  [{idx}/{len(paths)}] Instància: {inst['name']}")
+                for (cname, lsname) in METHODS:
+                    vals = []
+                    times = []
+                    log(f"    -> Mètode {cname}+{lsname} ({ITERS} iteracions)")
 
-                    # executa 100 iteracions per cada mètode
-                    method_stats = {}
-                    method_best = {}
+                    for it in range(ITERS):
+                        ofv, dt = run_one_iteration(inst, cname, lsname)
+                        vals.append(ofv)
+                        times.append(dt)
 
-                    for (cname, lsname) in METHODS:
-                        vals = []
-                        log(f"    -> Mètode {cname}+{lsname} ({ITERS} iteracions)")
+                        if (it + 1) % 10 == 0:
+                            log(f"       iter {it + 1}/{ITERS}")
 
-                        for it in range(ITERS):
-                            ofv = run_one_iteration(inst, cname, lsname)
-                            vals.append(ofv)
+                    best_v = max(vals)
+                    avg_v = sum(vals) / len(vals)
+                    std_v = stats.pstdev(vals) if len(vals) > 1 else 0.0
+                    avg_t = sum(times) / len(times)
 
-                            # heartbeat cada 10 iteracions (opcional però útil)
-                            if (it + 1) % 10 == 0:
-                                log(f"       iter {it + 1}/{ITERS}")
+                    log(f"       FI {cname}+{lsname}: best={best_v:.6f} avg={avg_v:.6f} t/iter={avg_t:.6f}s")
 
-                        best_v = max(vals)
-                        avg_v = sum(vals) / len(vals)
-                        log(f"       FI {cname}+{lsname}: best={best_v:.6f} avg={avg_v:.6f}")
+                    method_stats[(cname, lsname)] = (best_v, avg_v, std_v)
+                    method_best[(cname, lsname)] = best_v
+                    method_time[(cname, lsname)] = avg_t
 
-                        avg_v = sum(vals) / len(vals)
-                        std_v = stats.pstdev(vals) if len(vals) > 1 else 0.0
+                # mejor global en la instancia
+                best_global = max(method_best.values())
 
-                        method_stats[(cname, lsname)] = (best_v, avg_v, std_v)
-                        method_best[(cname, lsname)] = best_v
+                # filas por método, ya con desviación y bandera
+                for (cname, lsname) in METHODS:
+                    best_v, avg_v, std_v = method_stats[(cname, lsname)]
+                    avg_t = method_time[(cname, lsname)]
 
-                        per_instance_rows.append({
-                            "dataset": dataset,
-                            "instance": inst["name"],
-                            "n": n,
-                            "m": m,
-                            "constructive": cname,
-                            "local_search": lsname,
-                            "best_of": best_v,
-                            "avg_of": avg_v,
-                            "std_of": std_v,
-                            "iters": ITERS,
-                            "alpha_teua": ALPHA_TEUA if cname == "CGR" else "",
-                            "beta": BETA if cname == "CGR2" else "",
-                            "imls_k": IMLS_K if lsname == "IMLS" else "",
-                        })
+                    rel_dev = 0.0
+                    if best_global > EPS:
+                        rel_dev = (best_global - best_v) / best_global
 
-                    # guarda per summary
+                    is_best = 1 if abs(best_v - best_global) <= 1e-9 else 0
+
+                    per_instance_rows.append({
+                        "dataset": dataset,
+                        "instance": inst["name"],
+                        "n": n,
+                        "m": m,
+                        "constructive": cname,
+                        "local_search": lsname,
+                        "best_method_of": best_v,
+                        "best_global_of": best_global,
+                        "relative_dev": rel_dev,
+                        "is_best": is_best,
+                        "avg_time_per_iter": avg_t,
+                        "avg_of": avg_v,
+                        "std_of": std_v,
+                        "iters": ITERS,
+                        "alpha_teua": ALPHA_TEUA if cname == "CGR" else "",
+                        "beta": BETA if cname == "CGR2" else "",
+                    })
+
                     key = (dataset, n, m)
                     group_data.setdefault(key, []).append(method_best)
                     # --- guardat parcial per no perdre progrés ---
@@ -269,42 +310,34 @@ def experiment():
                     print("[SAVE] per_instance:", os.path.abspath(per_instance_path))
 
     # construeix summary: Dev, #Best, Score
-    for (dataset, n, m), instance_list in group_data.items():
-        # acumula
-        dev_sum = {meth: 0.0 for meth in METHODS}
-        best_count = {meth: 0 for meth in METHODS}
-        score_sum = {meth: 0.0 for meth in METHODS}
+    # -----------------------
+    # Summary desde per_instance_rows
+    # -----------------------
+    summary_acc = {}  # key=(dataset,n,m,constructive,local_search) -> acumuladores
 
-        for method_best in instance_list:
-            best_overall = max(method_best.values())
-            # Dev i #Best
-            for meth, val in method_best.items():
-                dev = 0.0
-                if best_overall > EPS:
-                    dev = 100.0 * (best_overall - val) / best_overall
-                dev_sum[meth] += dev
-                if abs(val - best_overall) <= 1e-9:
-                    best_count[meth] += 1
+    for row in per_instance_rows:
+        key = (row["dataset"], row["n"], row["m"], row["constructive"], row["local_search"])
+        acc = summary_acc.setdefault(key, {"dev_sum": 0.0, "best_sum": 0, "count": 0})
+        acc["dev_sum"] += row["relative_dev"]
+        acc["best_sum"] += row["is_best"]
+        acc["count"] += 1
 
-            # Score per rank
-            pts = rank_points(method_best)
-            for meth, pnt in pts.items():
-                score_sum[meth] += pnt
+    summary_rows = []
+    for (dataset, n, m, cname, lsname), acc in summary_acc.items():
+        summary_rows.append({
+            "dataset": dataset,
+            "n": n,
+            "m": m,
+            "constructive": cname,
+            "local_search": lsname,
+            "Dev_avg": acc["dev_sum"] / acc["count"],  # media de desviaciones (0-1)
+            "#Best": acc["best_sum"],  # suma de indicadores
+            "num_instances": acc["count"],  # número de instancias (filas) en ese grupo y método
+            "iters_per_method": ITERS,
+        })
 
-        num_inst = len(instance_list)
-        for (cname, lsname) in METHODS:
-            summary_rows.append({
-                "dataset": dataset,
-                "n": n,
-                "m": m,
-                "constructive": cname,
-                "local_search": lsname,
-                "Dev_avg_%": dev_sum[(cname, lsname)] / num_inst,
-                "#Best": best_count[(cname, lsname)],
-                "Score": score_sum[(cname, lsname)],
-                "num_instances": num_inst,
-                "iters_per_method": ITERS,
-            })
+    # ordenado bonito
+    summary_rows.sort(key=lambda r: (r["dataset"], r["n"], r["m"], r["constructive"], r["local_search"]))
 
     # escriu CSVs
     os.makedirs("results", exist_ok=True)

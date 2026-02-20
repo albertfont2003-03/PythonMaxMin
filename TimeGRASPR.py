@@ -1,71 +1,74 @@
-# compare_grasp_pr_params.py
-# Comparació de paràmetres per a GRASP+PR (Max-Min) usant el teu grasp_pr_time.execute(...)
-#
-# - Base GRASP: CGR + FLS
-# - PR: greedy PR (prgreedy_good) + FLS després de PR
-#
-# Genera:
-#   results/grasppr_per_instance.csv
-#   results/grasppr_summary.csv
-#
-# IMPORTANT:
-#  - Aquest script assumeix que tens grasp_pr_time.py i que exposa execute(inst, alpha, es_size, time_limit, time_doing_grasp)
-#  - I que tens els teus loaders d'instàncies Geo/Ran com als experiments anteriors.
 
-import os
-import re
-import csv
-import math
-import random
+# compare_grasppr_configs_like_final.py
+import os, re, csv, math, random, time
 import statistics as stats
 from datetime import datetime
 
-from algorithms.grasp_pr_time import execute
-# Si execute està en un altre mòdul/carpeta, ajusta l'import.
+from algorithms.grasp_pr_time import execute  # GRASP+PR time-based
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
-EPS = 1e-9
+EPS = 1e-12
 
-# -----------------------
-# CONFIG
-# -----------------------
+# ---------------- CONFIG ----------------
 INST_DIR = "instances"
 DATASETS = ["Geo", "Ran"]
-NS = [100, 250]
+NS = [100, 250, 500]
 M_FRACS = [0.1, 0.3]
-INSTANCES_PER_GROUP = 2
+INSTANCES_PER_GROUP = 10
 
-ALPHA = 0.3          # el que vols usar ara
+ALPHA = 0.1
 SEED = 12345
+TIME_LIMIT = 15
+RUNS = 3
 
-TIME_LIMIT = 10      # segons per execució
-RUNS = 2            # execucions per configuració (com que és time-based, 100 pot ser massa)
+ELITE_SIZES = [ 5, 10, 15]
+TIME_DOING_GRASP = 0.6   # fijo
 
-# Configs a comparar:
-ES_SIZES = [5, 10, 15, 20]
-TIME_SPLITS = [0.2, 0.4, 0.6, 0.8]   # time_doing_grasp
-# Pots comentar una dimensió si vols fer només un estudi.
-COMPARE_MODE = "es_only"  # "es_only", "split_only", "both"
 
-# -----------------------
-# Utils
-# -----------------------
+# ---------------- Utils ----------------
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
+def extract_idx(path):
+    base = os.path.basename(path)
+    m = re.search(r"(\d+)\.txt$", base)
+    return int(m.group(1)) if m else 10**9
+
+def list_instance_paths(dataset, n, base_dir=INST_DIR):
+    folder = os.path.join(base_dir, dataset)
+    files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".txt")]
+    pat = re.compile(rf"\b{n}\b")
+    files = [f for f in files if pat.search(os.path.basename(f))]
+    files.sort(key=extract_idx)
+    return files
+
+def m_for_instance(n, idx_file):
+    block = (idx_file - 1) // INSTANCES_PER_GROUP
+    frac = M_FRACS[min(block, len(M_FRACS) - 1)]
+    return int(round(frac * n)), frac
+
+def write_csv(path, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not rows:
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        fieldnames = list(rows[0].keys())
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+# -------- loaders (cópialos de tu script actual) --------
 def load_geo_instance(path, p):
     with open(path, "r") as f:
         lines = [ln.strip() for ln in f if ln.strip()]
-    n = int(lines[0])
-    K = int(lines[1])
+    n = int(lines[0]); K = int(lines[1])
     coords = []
     for ln in lines[2:2+n]:
         parts = ln.split()
         vec = list(map(float, parts[1:1+K]))
         coords.append(vec)
-
     d = [[0.0]*n for _ in range(n)]
     for i in range(n):
         for j in range(i+1, n):
@@ -95,189 +98,127 @@ def load_instance(dataset, path, p):
         return load_ran_instance(path, p)
     raise ValueError(dataset)
 
-def pick_instance_paths(dataset, n, k, base_dir=INST_DIR):
-    folder = os.path.join(base_dir, dataset)
-    files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".txt")]
-    pat = re.compile(rf"\b{n}\b")
-    files = [f for f in files if pat.search(os.path.basename(f))]
-    files.sort()
-    return files[:k]
-
-def write_csv(path, rows):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        if not rows:
-            return
-        fieldnames = list(rows[0].keys())
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        w.writerows(rows)
-
-# -----------------------
-# Config generation
-# -----------------------
-def make_configs():
-    cfgs = []
-    if COMPARE_MODE in ("es_only", "both"):
-        # Fixem split i variem es_size
-        for b in ES_SIZES:
-            cfgs.append({
-                "name": f"ES={b},split=0.4",
-                "es_size": b,
-                "time_doing_grasp": 0.4,
-            })
-    if COMPARE_MODE in ("split_only", "both"):
-        # Fixem es_size i variem split
-        for g in TIME_SPLITS:
-            cfgs.append({
-                "name": f"ES=10,split={g}",
-                "es_size": 10,
-                "time_doing_grasp": g,
-            })
-    # Elimina duplicats si "both" (p.ex. ES=10,split=0.4 apareix dos voltes)
-    seen = set()
-    uniq = []
-    for c in cfgs:
-        key = (c["es_size"], c["time_doing_grasp"])
-        if key not in seen:
-            uniq.append(c)
-            seen.add(key)
-    return uniq
-
-# -----------------------
-# One run
-# -----------------------
-def run_one(inst, cfg, run_id):
-    # Re-seed per run/config perquè siga reproduïble i comparable
-    # (evita que l'ordre de proves afecte el RNG global)
-    seed = SEED + 100000 * run_id + 97 * cfg["es_size"] + int(1000 * cfg["time_doing_grasp"])
+# ---------------- Runs ----------------
+def run_one(inst, es_size, run_id):
+    seed = SEED + 100000 * run_id + 97 * es_size
     random.seed(seed)
 
     best_sol, iters = execute(
         inst,
         alpha=ALPHA,
-        es_size=cfg["es_size"],
+        es_size=es_size,
         time_limit=TIME_LIMIT,
-        time_doing_grasp=cfg["time_doing_grasp"],
+        time_doing_grasp=TIME_DOING_GRASP,
     )
     return best_sol["of"], iters
 
-# -----------------------
-# Experiment
-# -----------------------
+
+# ---------------- Experiment ----------------
 def experiment():
-    log("== Comparativa GRASP+PR: elite set size / time split ==")
-    log(f"CWD: {os.getcwd()}")
-    log(f"ALPHA={ALPHA}, TIME_LIMIT={TIME_LIMIT}s, RUNS={RUNS}")
     os.makedirs("results", exist_ok=True)
-
-    configs = make_configs()
-    log(f"Configs: {len(configs)} -> " + ", ".join([c["name"] for c in configs]))
-
     per_instance_rows = []
     summary_rows = []
 
-    # Per summary: guardem per grup (dataset,n,m) una llista de dicts {cfg_key: best_of}
-    group_data = {}  # (dataset,n,m) -> list of dict(cfg_key -> best_of)
+    per_instance_path = os.path.join("results", "configs_per_instance.csv")
+    summary_path = os.path.join("results", "configs_summary.csv")
 
-    per_instance_path = os.path.join("results", "grasppr_per_instance.csv")
-    summary_path = os.path.join("results", "grasppr_summary.csv")
+    # acumuladores summary
+    summary_acc = {}  # (dataset,n,m,es_size,split) -> dev_sum, best_sum, count
 
-    try:
-        for dataset in DATASETS:
-            for n in NS:
-                for frac in M_FRACS:
-                    m = int(round(frac * n))
-                    paths = pick_instance_paths(dataset, n, INSTANCES_PER_GROUP)
+    for dataset in DATASETS:
+        for n in NS:
+            paths = list_instance_paths(dataset, n)
+            if not paths:
+                log(f"[WARN] No hay instancias para {dataset} n={n}")
+                continue
 
-                    log(f"Grup dataset={dataset}, n={n}, m={m} | instàncies={len(paths)}")
+            log(f"== Dataset={dataset} n={n}. Instancias={len(paths)} ==")
 
-                    for idx, path in enumerate(paths, start=1):
-                        inst = load_instance(dataset, path, p=m)
-                        log(f"  [{idx}/{len(paths)}] {inst['name']}")
+            for path in paths:
+                idx_file = extract_idx(path)
+                m, frac = m_for_instance(n, idx_file)
+                inst = load_instance(dataset, path, p=m)
 
-                        cfg_best = {}
+                log(f"  {inst['name']} (idx={idx_file}) -> m={m} (frac={frac})")
 
-                        for cfg in configs:
-                            vals = []
-                            iters_list = []
+                es_best = {}
+                es_avg = {}
+                es_std = {}
 
-                            log(f"    -> {cfg['name']} ({RUNS} runs)")
-                            for r in range(RUNS):
-                                ofv, itc = run_one(inst, cfg, r)
-                                vals.append(ofv)
-                                iters_list.append(itc)
+                for es_size in ELITE_SIZES:
+                    vals = []
+                    for r in range(RUNS):
+                        ofv, _ = run_one(inst, es_size, r)
+                        vals.append(ofv)
 
-                            best_v = max(vals)
-                            avg_v = sum(vals) / len(vals)
-                            std_v = stats.pstdev(vals) if len(vals) > 1 else 0.0
-                            avg_iters = sum(iters_list) / len(iters_list)
+                    es_best[es_size] = max(vals)
+                    es_avg[es_size] = sum(vals) / len(vals)
+                    es_std[es_size] = stats.pstdev(vals) if len(vals) > 1 else 0.0
 
-                            cfg_key = (cfg["es_size"], cfg["time_doing_grasp"])
-                            cfg_best[cfg_key] = best_v
+                best_global = max(es_best.values())
 
-                            per_instance_rows.append({
-                                "dataset": dataset,
-                                "instance": inst["name"],
-                                "n": n,
-                                "m": m,
-                                "alpha": ALPHA,
-                                "time_limit_s": TIME_LIMIT,
-                                "runs": RUNS,
-                                "es_size": cfg["es_size"],
-                                "time_doing_grasp": cfg["time_doing_grasp"],
-                                "best_of": best_v,
-                                "avg_of": avg_v,
-                                "std_of": std_v,
-                                "avg_grasp_iters": avg_iters,
-                            })
+                for es_size in ELITE_SIZES:
+                    best_v = es_best[es_size]
+                    rel_dev = 0.0 if best_global <= EPS else (best_global - best_v) / best_global
+                    is_best = 1 if abs(best_v - best_global) <= 1e-9 else 0
 
-                        group_data.setdefault((dataset, n, m), []).append(cfg_best)
+                    per_instance_rows.append({
+                        "dataset": dataset,
+                        "instance": inst["name"],
+                        "n": n,
+                        "m": m,
+                        "frac": frac,
+                        "alpha": ALPHA,
+                        "time_limit_s": TIME_LIMIT,
+                        "runs": RUNS,
 
-                        # Guardat incremental (per si pares)
-                        write_csv(per_instance_path, per_instance_rows)
-                        log("    [SAVE] grasppr_per_instance.csv actualitzat")
+                        "es_size": es_size,
+                        "time_doing_grasp": TIME_DOING_GRASP,
 
-        # Summary: Dev i #Best per configuració dins de cada grup (dataset,n,m)
-        for (dataset, n, m), inst_list in group_data.items():
-            # agreguem
-            dev_sum = {}
-            best_count = {}
-            for cfg in configs:
-                key = (cfg["es_size"], cfg["time_doing_grasp"])
-                dev_sum[key] = 0.0
-                best_count[key] = 0
+                        "best_es_of": best_v,
+                        "best_global_of": best_global,
+                        "relative_dev": rel_dev,
+                        "is_best": is_best,
 
-            for inst_cfg_best in inst_list:
-                best_overall = max(inst_cfg_best.values())
-                for cfg_key, val in inst_cfg_best.items():
-                    dev = 0.0 if best_overall <= EPS else 100.0 * (best_overall - val) / best_overall
-                    dev_sum[cfg_key] += dev
-                    if abs(val - best_overall) <= 1e-9:
-                        best_count[cfg_key] += 1
+                        "avg_of": es_avg[es_size],
+                        "std_of": es_std[es_size],
+                    })
 
-            num_inst = len(inst_list)
-            for cfg in configs:
-                cfg_key = (cfg["es_size"], cfg["time_doing_grasp"])
-                summary_rows.append({
-                    "dataset": dataset,
-                    "n": n,
-                    "m": m,
-                    "alpha": ALPHA,
-                    "time_limit_s": TIME_LIMIT,
-                    "runs": RUNS,
-                    "es_size": cfg["es_size"],
-                    "time_doing_grasp": cfg["time_doing_grasp"],
-                    "Dev_avg_%": dev_sum[cfg_key] / num_inst,
-                    "#Best": best_count[cfg_key],
-                    "num_instances": num_inst,
-                })
+                    acc_key = (dataset, n, m, es_size)
+                    acc = summary_acc.setdefault(acc_key, {"dev_sum": 0.0, "best_sum": 0, "count": 0})
+                    acc["dev_sum"] += rel_dev
+                    acc["best_sum"] += is_best
+                    acc["count"] += 1
 
-    finally:
-        write_csv(per_instance_path, per_instance_rows)
-        write_csv(summary_path, summary_rows)
-        print("[OK] Saved:", os.path.abspath(per_instance_path))
-        print("[OK] Saved:", os.path.abspath(summary_path))
+                # guardado incremental
+                write_csv(per_instance_path, per_instance_rows)
+                log("    [SAVE] configs_per_instance.csv actualizado")
+
+    # 4) Summary
+    for (dataset, n, m, es_size), acc in summary_acc.items():
+        summary_rows.append({
+            "dataset": dataset,
+            "n": n,
+            "m": m,
+            "alpha": ALPHA,
+            "time_limit_s": TIME_LIMIT,
+            "runs": RUNS,
+            "es_size": es_size,
+            "time_doing_grasp": TIME_DOING_GRASP,
+            "Dev_avg": acc["dev_sum"] / acc["count"],
+            "#Best": acc["best_sum"],
+            "num_instances": acc["count"],
+        })
+
+    summary_rows.sort(key=lambda r: (r["dataset"], r["n"], r["m"], r["es_size"]))
+
+
+    write_csv(summary_path, summary_rows)
+
+    log("[OK] Saved:")
+    log(os.path.abspath(per_instance_path))
+    log(os.path.abspath(summary_path))
 
 if __name__ == "__main__":
     experiment()
+

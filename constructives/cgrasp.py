@@ -14,7 +14,7 @@ def construct(inst, alpha):
 
     while not solution.isFeasible(sol):
 
-        # ✅ PROTECCIÓN 1: evitar CL vacía
+
         if not cl:
             raise RuntimeError(
                 f"CL vacía antes de ser factible: n={inst['n']} p={inst['p']} |sol|={len(sol['sol'])}"
@@ -23,10 +23,10 @@ def construct(inst, alpha):
         gmin, gmax = evalGMinGMax(cl)
         threshold = gmax - alpha * (gmax - gmin)
 
-        # construir RCL
+
         rcl = [c for c in cl if c[0] >= threshold - 1e-12]
 
-        # ✅ PROTECCIÓN 2: fallback si RCL vacía
+
         if not rcl:
             rcl = cl[:]
 
